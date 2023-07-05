@@ -1,6 +1,6 @@
 from os import link
 import discord
-import youtube_dl
+import yt_dlp as youtube_dl
 import asyncio
 import datetime as dt
 import enum
@@ -10,10 +10,9 @@ import urllib.request
 import re
 import lxml.html
 import random
-import time
-from apikeys import *
+#from apikeys import *
 from itertools import islice
-from youtube_dl import YoutubeDL
+from yt_dlp import YoutubeDL
 from discord import voice_client
 from discord.channel import VoiceChannel
 from discord.ext import commands
@@ -22,174 +21,172 @@ from discord.utils import get
 from enum import Enum
 from bs4 import BeautifulSoup
 
-client = commands.Bot(command_prefix = '-')
-#stores the downloaded audio
+#intents = discord.Intents().all()
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+client = commands.Bot(command_prefix = '-', intents = intents)
+queues = {}
 playlist = []
-#stores the url of the videos
-playlist_url = []
-
+universal_url = ""
+looped = False
+current_song = ""
 #YouTube DL options 
-YDL_OPTIONS = {'format': 'bestaudio/best','noplaylist':'True','postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}] }
+ydl_opts = {'format': 'bestaudio/best','noplaylist':'True','postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}] }
 #FFMPEG options:
 FFMPEG_OPTIONS = {'options': '-vn', 'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'}
 
-#when the bot first boots up and is ready, print to console and show online status
+def check_queue(ctx, id):
+    if id in queues and queues[id]:
+        voice = ctx.guild.voice_client
+        source = queues[id].pop(0)
+        current_song = playlist[0]
+        playlist.pop(0)
+
+        titleurl = get_name(current_song)
+
+        embed = discord.Embed(
+            title="Playing " + titleurl,
+            colour=ctx.author.colour,
+        )
+
+        asyncio.run_coroutine_threadsafe(ctx.send(embed=embed), client.loop)
+        player = voice.play(source, after=lambda x=None: check_queue(ctx, ctx.message.guild.id))
+    else:
+        # Handle the case when the queue is empty or the guild ID doesn't exist
+        pass
+
+def get_name(url):
+    reqs = requests.get(url)
+    soup = BeautifulSoup(reqs.text, 'html.parser')
+    for title in soup.find_all('title'):
+        t =  "[" + title.get_text() + "](" + url + ")"
+    return t
+
 @client.event
 async def on_ready():
     print("Bot is ready woop woop")
-    activity = discord.Game(name="Type -h for help", type=3)
+    activity = discord.Game(name="-h for help", type=3)
     await client.change_presence(status=discord.Status.online, activity=activity)
 
-#clear all function, clears the playlist
 def clear_all():
-    playlist = []
-    playlist_url = []
+    queues.clear()
+    playlist[:] = []
 
-#play next song function
-def play_next(ctx):
-    if playlist != []:
+@client.command()
+async def print(ctx):
+    print(queues)
 
-        #get the song and then delete it off of playlist
-        url = playlist[0]
-        del playlist[0]
-        
-        url_title = playlist_url[0]
-        del playlist_url[0]
-
-        asyncio.run_coroutine_threadsafe(ctx.send("Now playing " + url_title), client.loop)
-        #play the song
-        source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(url))
-        ctx.voice_client.play(source, after=lambda e: play_next(ctx))
-        
-    else:
-        vc = get(client.voice_clients, guild=ctx.guild)
-        if not vc.is_playing():
-            time.sleep(300) 
-            asyncio.run_coroutine_threadsafe(ctx.send("No one was using me so I left"), client.loop)
-            asyncio.run_coroutine_threadsafe(vc.disconnect(), client.loop)
-            clear_all()
-
-           
-#play command
 @client.command()
 async def p(ctx, *, url):
 
-    #check if user is in vc and if not tell them to join one
     if(ctx.author.voice):
 
-        #get the bot to join the vc that the user is in (if it's not in it already)
-        if not ctx.voice_client:
-            channel = ctx.message.author.voice.channel
+        if(ctx.voice_client):
+            print("already in a vc, moving to song")
+        else:
+            channel = ctx.author.voice.channel
             await channel.connect()
-
-        #Play the song the user requested
-        
         voice = get(client.voice_clients, guild=ctx.guild)
-        
-        #check to see if the "url" is actually one or not
+    
         if(url[0:5] == "https"):
-            
-            #if the bot isn't playing a song then play the song, else add that song to the queue
+           
             if not voice.is_playing():
-
-                #get the audio from the link
-                with YoutubeDL(YDL_OPTIONS) as ydl:
+                with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                URL = info['formats'][0]['url'] 
-        
-                #play the song
-                source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(URL))
-                ctx.voice_client.play(source, after=lambda e: play_next(ctx))
+                URL = info['url']
+                voice.play(discord.FFmpegPCMAudio(URL), after=lambda x=None: check_queue(ctx,ctx.message.guild.id))
                 voice.is_playing()
-
-                #write that it is playing song to the user
                 await ctx.send("Playing " + url)
 
-            #if the bot is playing a song, then add the requested song to the queue
+                #########################################
+                while voice.is_playing(): #Checks if voice is playing
+                    await asyncio.sleep(1) #While it's playing it sleeps for 1 second
+                else:
+                    await asyncio.sleep(300) #If it's not playing it waits 300 seconds
+                    while voice.is_playing(): #and checks once again if the bot is not playing
+                        break #if it's playing it breaks
+                    else:
+                        await voice.disconnect() #if not it disconnects
+                        clear_all()
+                        await ctx.send("No one was using me so I left")
+                    
             else:
-                #tell the user that their song has been added to the queue
                 await ctx.send("Already playing song, added " + url + " to queue")
+                playlist.append(url)
 
-                with YoutubeDL(YDL_OPTIONS) as ydl:
+                with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                URL = info['formats'][0]['url'] 
+                URL = info['url']
 
-                playlist_url.append(url)
-                playlist.append(URL)
-
-
-        #if the user request is NOT a url, find the best url and play that
+                source = FFmpegPCMAudio(URL, **FFMPEG_OPTIONS)
+                guild_id = ctx.message.guild.id
+                if(guild_id in queues):
+                    queues[guild_id].append(source)
+                else:
+                    queues[guild_id] = [source]
+                return
         else:
-            #find the best url for the text inputted
+            #do the youtube search thing here
             query_string = urllib.parse.urlencode({'search_query': url})
             htm_content = urllib.request.urlopen('http://www.youtube.com/results?' + query_string)
             search_results = re.findall(r'/watch\?v=(.{11})',htm_content.read().decode())
             url = "http://www.youtube.com/watch?v=" + search_results[0]
+            universal_url = url
+           
+            voice = get(client.voice_clients, guild=ctx.guild)
 
-            #if the bot isn't playing a song then play the song, else add that song to the queue
             if not voice.is_playing():
-
-                #get the audio from the link
-                with YoutubeDL(YDL_OPTIONS) as ydl:
+                
+                with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                URL = info['formats'][0]['url'] 
-        
-                #play the song
-                source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(URL))
-                ctx.voice_client.play(source, after=lambda e: play_next(ctx))
+                URL = info['url']
+                voice.play(discord.FFmpegPCMAudio(URL), after=lambda x=None: check_queue(ctx,ctx.message.guild.id))
                 voice.is_playing()
-
-                #write that it is playing song to the user
                 await ctx.send("Playing " + url)
-
-            #if the bot is playing a song, then add the requested song to the queue
+            
+                #########################################
+                while voice.is_playing(): #Checks if voice is playing
+                    await asyncio.sleep(1) #While it's playing it sleeps for 1 second
+                else:
+                    await asyncio.sleep(300) #If it's not playing it waits 300 seconds
+                    while voice.is_playing(): #and checks once again if the bot is not playing
+                        break #if it's playing it breaks
+                    else:
+                        await voice.disconnect() #if not it disconnects
+                        clear_all()
+                        await ctx.send("No one was using me so I left")
+                        
             else:
-                #tell the user that their song has been added to the queue
+                playlist.append(url)
+                voice = discord.utils.get(client.voice_clients, guild=ctx.guild)
+
+                voice = get(client.voice_clients, guild=ctx.guild)
+
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                URL = info['url']
+
+                source = FFmpegPCMAudio(URL, **FFMPEG_OPTIONS)
+                guild_id = ctx.message.guild.id
+                if(guild_id in queues):
+                    queues[guild_id].append(source)
+                else:
+                    queues[guild_id] = [source]
                 await ctx.send("Already playing song, added " + url + " to queue")
 
-                with YoutubeDL(YDL_OPTIONS) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                URL = info['formats'][0]['url']
-
-                playlist_url.append(url)
-                playlist.append(URL)
-
-        #leave after all of the songs are done playing
-        while voice.is_playing(): #Checks if voice is playing
-            await asyncio.sleep(1) #While it's playing it sleeps for 1 second
-        else:
-            await asyncio.sleep(300) #If it's not playing it waits 300 seconds
-            while voice.is_playing(): #and checks once again if the bot is not playing
-                break #if it's playing it breaks
-            else:
-                await voice.disconnect() #if not it disconnects
-                clear_all()
-                await ctx.send("No one was using me so I left")
-            
-    #if user is not in vc, tell them to join one
     else:
-        await ctx.send("You are not in a voice channel, so join one!")
+        await ctx.send("You aren't in a voice channel, so join one!")
 
-#leave command
 @client.command(pass_context = True)
 async def L(ctx):
     if(ctx.voice_client):
         await ctx.guild.voice_client.disconnect()
         clear_all()
-        await ctx.send("No wants me so I left")
+        await ctx.send("No one wanted me so I left")
     else:
         await ctx.send("I am not in a vc")
 
-#join command
-@client.command(pass_context = True)
-async def J(ctx):
-    if(ctx.author.voice):
-        channel = ctx.message.author.voice.channel
-        await channel.connect()
-    else:
-        await ctx.send("You aren't in a voice channel, so join one!")
-
-#pause command
 @client.command(pass_context = True)
 async def pause(ctx):
     if(ctx.author.voice):
@@ -202,7 +199,6 @@ async def pause(ctx):
     else:
         await ctx.send("You aren't in a voice channel, so join one!")
 
-#resume command
 @client.command(pass_context = True)
 async def resume(ctx):
     if(ctx.author.voice):
@@ -215,12 +211,17 @@ async def resume(ctx):
     else:
         await ctx.send("You aren't in a voice channel, so join one!")
 
-#queue command
-def get_name(url):
-    with YoutubeDL(YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(url, download=False)
-        title = info.get("title")
-    return title
+@client.command()
+async def s(ctx):
+    if(ctx.author.voice):
+        if(playlist == []):
+            await ctx.send("There aren't any songs in the queue, go add some")
+        else:
+            await ctx.send("Playing next song")
+            voice = discord.utils.get(client.voice_clients, guild=ctx.guild)
+            voice.stop()
+    else:
+        await ctx.send("You aren't in a voice channel, so join one!")
 
 @client.command()
 async def q(ctx):
@@ -233,14 +234,42 @@ async def q(ctx):
         embed.set_author(name="Queue")
         
         counter = 1
-        for i in playlist_url:
+        for i in playlist:
             embed.add_field(name = counter, value= get_name(i), inline=False)
             counter = counter + 1
         await ctx.send(embed=embed)
     else:
         await ctx.send("You aren't in a voice channel, so join one!")
 
-#help command
+@client.command()
+async def r(ctx, number):
+    if(ctx.author.voice):
+        num = int(number)
+        num = num - 1
+
+        url = playlist[num]
+        playlist.pop(num)
+
+        id = ctx.message.guild.id
+        source = queues[id].pop(num)
+
+        await ctx.send("Removed " + get_name(url) + " from the queue")
+    else:
+        await ctx.send("You aren't in a voice channel, so join one!")
+
+@client.command()
+async def clear(ctx):
+    if(ctx.author.voice):
+        clear_all()
+        embed = discord.Embed(
+            title="Cleared the queue. You're welcome",
+            colour=ctx.author.colour,  
+        )     
+
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("You aren't in a voice channel, so join one!")
+
 @client.command()
 async def h(ctx):
     embed = discord.Embed(
@@ -257,28 +286,34 @@ async def h(ctx):
     embed.add_field(name = "View Queue", value= "-q", inline=False)
     embed.add_field(name = "Remove song from Queue", value= "-r + (# of the song in the queue)", inline=False)
     embed.add_field(name = "Clear the Queue", value= "-clear", inline=False)
-    
+    embed.add_field(name = "Talk to ChatGPT", value= "-chat + (the message you want to tell to the bot)", inline=False)
+    embed.add_field(name = "Kill someone or something ;)", value= "-kill + whatever you want", inline=False)
     await ctx.send(embed=embed)
-
-#clear command
-@client.command()
-async def clear(ctx):
-    if(ctx.author.voice):
-        clear_all()
-        await ctx.send("Cleared the queue")
-    else:
-        await ctx.send("You aren't in a voice channel, so join one!")
+    
+import openai,os,sys
+openai.api_key = "hidden =)"
 
 @client.command()
-async def r(ctx, number):
-    if(ctx.author.voice):
-        index = int(number)
-        index = index - 1
-        url = playlist_url[index]
-        playlist_url.pop(index)
-        playlist.pop(index)
-        await ctx.send("Removed " + get_name(url) + " from the queue")
-    else:
-        await ctx.send("You aren't in a voice channel, so join one!")
+async def chat(ctx, *, url):
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+    ]
+    
+    message = url + " Make the response less than 2000 characters"
+    if message:
+        messages.append( 
+                {"role": "user", "content": message},
+        )
+        chat_completion = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=messages
+        )
+    answer = chat_completion.choices[0].message.content
+    length = len(answer)
+    print(length)
+    
+    await ctx.reply(answer)
 
-client.run(OAUTH_TOKEN)
+
+client.run('hidden =)')
+
